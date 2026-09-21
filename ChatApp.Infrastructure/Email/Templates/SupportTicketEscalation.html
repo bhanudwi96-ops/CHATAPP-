@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Support Ticket Notification</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #070b14; color: #f8fafc; margin: 0; padding: 24px;">
+    <table width="100%" border="0" cellspacing="0" cellpadding="0">
+        <tr>
+            <td align="center">
+                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 580px; background-color: #0d1527; border-radius: 16px; padding: 32px; border: 1px solid #1e293b; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);">
+                    <tr>
+                        <td style="border-bottom: 1px solid #1e293b; padding-bottom: 18px; margin-bottom: 24px;">
+                            <h2 style="margin: 0; color: #38bdf8; font-size: 20px; font-weight: 800; letter-spacing: -0.3px;">⚡ [NEW SUPPORT INQUIRY]</h2>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top: 20px;">
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="font-size: 14px; line-height: 1.6;">
+                                <tr>
+                                    <td width="130" style="padding: 8px 0; color: #94a3b8; font-weight: 600;">Ticket Ref:</td>
+                                    <td style="padding: 8px 0;">
+                                        <span style="font-family: 'Courier New', Courier, monospace; font-size: 15px; color: #38bdf8; font-weight: 800; background-color: rgba(14, 165, 233, 0.15); padding: 3px 8px; border-radius: 6px;">{{ReferenceNumber}}</span>
+                                        &nbsp;
+                                        <span style="background-color: #0ea5e9; color: #ffffff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase;">{{Category}}</span>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; color: #94a3b8; font-weight: 600;">Customer Name:</td>
+                                    <td style="padding: 8px 0; color: #ffffff; font-weight: 700; font-size: 14.5px;">{{UserName}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; color: #94a3b8; font-weight: 600;">Customer Email:</td>
+                                    <td style="padding: 8px 0;">
+                                        <a href="mailto:{{UserEmail}}" style="color: #38bdf8; text-decoration: none; font-weight: 600;">{{UserEmail}}</a>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; color: #94a3b8; font-weight: 600;">Subject:</td>
+                                    <td style="padding: 8px 0; color: #ffffff; font-weight: 700; font-size: 14.5px;">{{Subject}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; color: #94a3b8; font-weight: 600;">Submitted At:</td>
+                                    <td style="padding: 8px 0; color: #cbd5e1;">{{CreatedAt}}</td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top: 20px;">
+                            <p style="margin: 0 0 8px 0; color: #94a3b8; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Customer Message:</p>
+                            <div style="background-color: #070b14; border-left: 4px solid #0ea5e9; border: 1px solid #1e293b; padding: 16px; border-radius: 8px; color: #f8fafc; font-size: 14px; line-height: 1.6; white-space: pre-wrap;">{{Message}}</div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top: 24px; border-top: 1px solid #1e293b; font-size: 12px; color: #64748b; text-align: center;">
+                            ChatApp Automated Support Dispatcher &bull; Internal Alert Only
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

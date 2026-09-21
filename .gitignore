@@ -1,0 +1,59 @@
+# ==========================================
+# .NET / C# Build Outputs & User Cache
+# ==========================================
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# ==========================================
+# Frontend (React / Vite)
+# ==========================================
+chat-app-ui/node_modules/
+node_modules/
+chat-app-ui/dist/
+dist/
+chat-app-ui/.env.local
+chat-app-ui/.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================================
+# Python Vector Sidecar (FastAPI / FAISS)
+# ==========================================
+vector-sidecar/venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+vector-sidecar/.env
+vector-sidecar/index.faiss
+vector-sidecar/id_map.json
+
+# ==========================================
+# Scratch, Test Artifacts & Archives
+# ==========================================
+scratch/
+*.log
+*.zip
+ChatApp_*.zip
+TestResults/
+benchmark_results.csv
+
+# ==========================================
+# Operating System Files
+# ==========================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
