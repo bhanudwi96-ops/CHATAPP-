@@ -48,6 +48,16 @@ scratch/
 ChatApp_*.zip
 TestResults/
 benchmark_results.csv
+chat-app-ui/vite.config.js.timestamp-*
+
+# ==========================================
+# Internal Planning, Audits & Local Reports
+# ==========================================
+implementation_plan*.md
+project_audit.md
+PERFORMANCE_TESTING_REPORT.md
+UPGRADE_GUIDE.md
+LINKEDIN_POST*.md
 
 # ==========================================
 # Operating System Files
