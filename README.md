@@ -127,8 +127,8 @@ ChatApp/
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/<your-username>/ChatApp.git
-cd ChatApp
+git clone https://github.com/bhanudwi96-ops/CHATAPP-.git
+cd CHATAPP-
 ```
 
 ### 2. Configure Environment Secrets
@@ -194,5 +194,5 @@ Distributed under the **MIT License**. See `LICENSE` for more information.
 
 ---
 
-**Author**: [Bhanu Dwivedi](https://github.com/bhanudwi96)  
+**Author**: [Bhanu Dwivedi](https://github.com/bhanudwi96-ops)  
 **LinkedIn**: [linkedin.com/in/bhanudwivedi](https://linkedin.com/in/bhanudwivedi)
