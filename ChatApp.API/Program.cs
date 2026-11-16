@@ -18,6 +18,16 @@ AppContext.SetSwitch("System.Net.DisableIPv6", true);
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Gemini API keys are sent in a header. Keep key-bearing headers redacted if
+// HttpClient request-header logging is enabled at Trace level.
+builder.Services.ConfigureHttpClientDefaults(client =>
+    client.RedactLoggedHeaders(header =>
+        header.Equals("x-goog-api-key", StringComparison.OrdinalIgnoreCase) ||
+        header.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
+        header.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) ||
+        header.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ||
+        header.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase)));
+
 // ============ DATABASE ============
 builder.Services.AddDbContext<ChatDbContext>(options =>
     options.UseSqlServer(
@@ -132,6 +142,16 @@ builder.Services.AddScoped<ChatApp.API.Services.IIntentService, ChatApp.API.Serv
 builder.Services.AddScoped<ChatApp.API.Services.IMemoryService, ChatApp.API.Services.MemoryService>();
 // Scope policy — deterministic OutOfScope guard enforcement
 builder.Services.AddSingleton<ChatApp.API.Services.IChatScopePolicy, ChatApp.API.Services.ChatScopePolicy>();
+
+// ============ SPRINT 1 — AI SECURITY & TOOL GOVERNANCE ============
+// ToolRegistry: singleton — validates tool name/enabled state before any dispatch.
+//               Unknown and disabled tools fail closed.
+builder.Services.AddSingleton<ChatApp.API.Services.IToolRegistry, ChatApp.API.Services.ToolRegistry>();
+// ToolPolicy: singleton — authorizes tool execution using server-side JWT identity only.
+builder.Services.AddSingleton<ChatApp.API.Services.IToolPolicy, ChatApp.API.Services.ToolPolicy>();
+// ToolThrottle: singleton — enforces per-session tool invocation limits.
+//               NOTE: In-memory state, resets on restart. Acceptable for single-instance.
+builder.Services.AddSingleton<ChatApp.API.Services.IToolThrottle, ChatApp.API.Services.ToolThrottle>();
 
 
 // ============ OTP SETTINGS ============

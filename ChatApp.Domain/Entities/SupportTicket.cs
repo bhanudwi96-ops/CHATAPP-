@@ -8,7 +8,8 @@ namespace ChatApp.Domain.Entities
         TechnicalIssue = 1,
         AccountHelp = 2,
         Billing = 3,
-        FeatureRequest = 4
+        FeatureRequest = 4,
+        SecurityIncident = 5
     }
 
     public enum TicketStatus

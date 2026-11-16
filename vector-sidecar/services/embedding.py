@@ -24,7 +24,7 @@ VECTOR_DIM      = 768   # Gemini embedding output dimension (matches FAISS Index
 
 _ENDPOINT_TEMPLATE = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "{model}:embedContent?key={key}"
+    "{model}:embedContent"
 )
 
 
@@ -72,7 +72,7 @@ async def embed_text(text: str) -> Optional[List[float]]:
         return None
 
     model = EMBEDDING_MODEL
-    endpoint = _ENDPOINT_TEMPLATE.format(model=model, key=api_key)
+    endpoint = _ENDPOINT_TEMPLATE.format(model=model)
     # Truncate at 2000 chars (Gemini embedContent limit)
     truncated = text[:2000] if len(text) > 2000 else text
 
@@ -86,7 +86,11 @@ async def embed_text(text: str) -> Optional[List[float]]:
 
     try:
         client = await get_http_client()
-        resp = await client.post(endpoint, json=payload)
+        resp = await client.post(
+            endpoint,
+            json=payload,
+            headers={"x-goog-api-key": api_key},
+        )
         if not resp.is_success:
             logger.warning(
                 "Gemini embedding API returned %s for text '%s...'",

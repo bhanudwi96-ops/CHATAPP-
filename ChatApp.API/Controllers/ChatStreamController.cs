@@ -79,6 +79,42 @@ namespace ChatApp.API.Controllers
                 return;
             }
 
+            // ── Sprint 1: InputGuard ──────────────────────────────────────────────
+            // Runs BEFORE any DB query or Gemini call. Rejects too-long messages and
+            // obvious prompt-injection signals. Fully deterministic, zero external calls.
+            var guardResult = InputGuard.Evaluate(request.Message, _configuration);
+            if (!guardResult.IsAllowed)
+            {
+                _logger.LogWarning("[InputGuard] Blocked message. SessionId={SessionId}, Reason={Reason}",
+                    request.SessionId, guardResult.BlockReason);
+
+                try
+                {
+                    _dbContext.AiAuditLogs.Add(new AiAuditLog
+                    {
+                        SessionId = request.SessionId,
+                        Timestamp = DateTime.UtcNow,
+                        Intent = "Blocked",
+                        ModelUsed = "InputGuard",
+                        BlockReason = guardResult.BlockReason,
+                        UserMessageSnippet = request.Message.Length > 100
+                            ? request.Message[..97] + "..."
+                            : request.Message
+                    });
+                    await _dbContext.SaveChangesAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to write InputGuard audit log.");
+                }
+
+                Response.StatusCode = 400;
+                Response.ContentType = "application/json";
+                await Response.WriteAsync(
+                    System.Text.Json.JsonSerializer.Serialize(new { error = guardResult.UserMessage }));
+                return;
+            }
+
             // ── Supersede any in-flight stream for this session ───────────────────
             var sessionCts = new CancellationTokenSource();
             if (_activeStreams.TryRemove(request.SessionId, out var existingCts))

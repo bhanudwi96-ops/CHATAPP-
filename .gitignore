@@ -58,6 +58,11 @@ project_audit.md
 PERFORMANCE_TESTING_REPORT.md
 UPGRADE_GUIDE.md
 LINKEDIN_POST*.md
+ChatApp_*.html
+ChatApp_*.pdf
+chatapp_security_complete.md
+debug_excel_sheet.py
+extract_excel_gui.py
 
 # ==========================================
 # Operating System Files

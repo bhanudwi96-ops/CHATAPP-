@@ -44,5 +44,25 @@ namespace ChatApp.Domain.Entities
         /// Truncated to 500 chars to avoid unbounded storage.
         /// </summary>
         public string? UserMessageSnippet { get; set; }
+
+        /// <summary>
+        /// JSON array recording each tool call attempted in this orchestration turn.
+        /// Each entry: { "tool": "createTicket", "allowed": true, "blockReason": null }
+        /// Null when no tool was invoked.
+        /// </summary>
+        public string? ToolCallsJson { get; set; }
+
+        /// <summary>
+        /// Reason a request or tool call was blocked by a server-side policy.
+        /// See AuditBlockReasons for defined constant values.
+        /// Null when the request completed normally.
+        /// </summary>
+        public string? BlockReason { get; set; }
+
+        /// <summary>
+        /// Authenticated user ID (from JWT) when the request was made by an authenticated user.
+        /// Null for anonymous/guest sessions.
+        /// </summary>
+        public Guid? AuthenticatedUserId { get; set; }
     }
 }

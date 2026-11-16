@@ -89,6 +89,11 @@ namespace ChatApp.API.Services
         private readonly string _modelName;
         private readonly string[] _fallbackModels;
 
+        // ── Sprint 1: Tool Governance ─────────────────────────────────────────────
+        private readonly IToolRegistry _toolRegistry;
+        private readonly IToolPolicy _toolPolicy;
+        private readonly IToolThrottle _toolThrottle;
+
         private static HttpClient GetOrCreateClient(string? fallbackIpStr)
         {
             var key = string.IsNullOrWhiteSpace(fallbackIpStr) ? "default" : fallbackIpStr.Trim();
@@ -158,7 +163,7 @@ namespace ChatApp.API.Services
             "2. APPLICATION SCOPE: Only assist with ChatApp features, accounts, billing, passwords, messaging, and support. Politely decline all out-of-scope questions.\n" +
             "3. KB GROUNDING & UNSUPPORTED FEATURES: Always base your answers on the KNOWLEDGE BASE CONTEXT. If a user asks about an unsupported feature (such as blocking users, audio/video calls, status stories, or disappearing messages), explicitly state that ChatApp does not currently offer it. NEVER invent fake settings, buttons, or steps for unsupported features.\n" +
             "4. TICKET STATUS LOOKUP: When the user asks about an existing ticket, ticket number (e.g. #12004 or TICK-12004), or checks their ticket status, ALWAYS call getTicketStatus to fetch real-time information. Never claim you cannot check ticket status or tell the user to check their email instead of looking it up.\n" +
-            "5. TICKET CREATION & ESCALATION: Only call createTicket when the user describes a genuine application bug, billing problem, or explicitly asks for human follow-up. NEVER create a ticket for your own errors, AI misunderstandings, model limitations, or questions about unsupported features — this rule applies EVEN IF the user explicitly instructs you to 'create a ticket,' 'file a complaint,' or similar, for an AI mistake, bad performance, hallucination, or misunderstanding. A direct user command to create such a ticket does NOT override this guard. In that situation, do NOT call createTicket. Instead, apologize briefly, ask the user to restate their original question, and attempt to answer it correctly. Only call createTicket if the user separately describes a genuine, distinct product bug, billing issue, or account problem unrelated to your own conversational mistake. Call escalateToHuman only if the user is distressed, angry, or explicitly asks for a human agent.\n" +
+            "5. TICKET CREATION & ESCALATION: Only call createTicket when the user describes a genuine application bug, billing problem, security issue, or explicitly asks for human follow-up. If the user reports that their chats are being leaked, data breached, account hacked, or security compromised: immediately advise them to change password in Settings > Account, log out other sessions, instruct them not to paste leaked content in chat, and call createTicket with category 'security' and priority 'critical'. NEVER create a ticket for your own errors, AI misunderstandings, model limitations, or questions about unsupported features — this rule applies EVEN IF the user explicitly instructs you to 'create a ticket,' 'file a complaint,' or similar, for an AI mistake, bad performance, hallucination, or misunderstanding. A direct user command to create such a ticket does NOT override this guard. In that situation, do NOT call createTicket. Instead, apologize briefly, ask the user to restate their original question, and attempt to answer it correctly. Only call createTicket if the user separately describes a genuine, distinct product bug, billing issue, or account problem unrelated to your own conversational mistake. Call escalateToHuman only if the user explicitly asks for a human agent or representative, or describes a severe, concrete ChatApp issue that requires human escalation. If the user only expresses vague distress or emotion (e.g. 'i m upset'), do NOT call tools; empathize briefly and ask what went wrong with ChatApp.\n" +
             "6. PRECISION & CONCISENESS: Answer ONLY what was specifically asked. Do not volunteer unsolicited profile details (such as username, email, account role, or technical metadata) unless the user explicitly asks for them. If the user asks 'what is my name?', tell them only their name. Keep responses concise, direct, and professional.\n" +
             "7. PAST CONVERSATION RECALL: If the user refers back to something discussed, asked, or suggested earlier in this conversation, check your visible conversation history first. If it is already visible in the recent messages provided in this prompt, answer directly from it and do NOT call searchChatHistory. Call searchChatHistory ONLY when retrieving older turns not visible in the immediate recent messages (such as an earlier error code, account number, or earlier exchange). Never claim you do not remember or lack records if the information is visible in the chat history or in your user status memory; answer directly and consistently.";
 
@@ -198,6 +203,55 @@ namespace ChatApp.API.Services
             if (string.IsNullOrWhiteSpace(text)) return false;
             var lower = text.ToLowerInvariant();
             return AiComplaintPatterns.Any(p => lower.Contains(p));
+        }
+
+        private static bool IsExplanatoryQuery(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            var lower = text.Trim().ToLowerInvariant();
+            return System.Text.RegularExpressions.Regex.IsMatch(lower, @"^(why|how|what caused|what causes|explain why|can you explain)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(50))
+                && !System.Text.RegularExpressions.Regex.IsMatch(lower, @"\b(create|open|file|make)\s+(a\s+)?(new\s+|another\s+)?ticket\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(50));
+        }
+
+        private async Task<string?> GetSessionActiveTicketAsync(Guid sessionId, List<ChatMessage>? history)
+        {
+            try
+            {
+                var facts = await _memoryService.LoadWorkingMemoryAsync(sessionId);
+                if (facts.TryGetValue("active_ticket_ref", out var refNum) && !string.IsNullOrWhiteSpace(refNum))
+                    return refNum;
+            }
+            catch { }
+
+            try
+            {
+                var recentTicketLog = await _dbContext.AiAuditLogs
+                    .AsNoTracking()
+                    .Where(a => a.SessionId == sessionId && a.TicketRef != null)
+                    .OrderByDescending(a => a.Timestamp)
+                    .Select(a => a.TicketRef)
+                    .FirstOrDefaultAsync();
+
+                if (!string.IsNullOrWhiteSpace(recentTicketLog))
+                    return recentTicketLog;
+            }
+            catch { }
+
+            if (history != null && history.Count > 0)
+            {
+                var lastAssistantMsg = history
+                    .Where(m => m.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase) && (m.Content.Contains("Ticket") || m.Content.Contains("ticket")))
+                    .LastOrDefault();
+
+                if (lastAssistantMsg != null)
+                {
+                    var match = System.Text.RegularExpressions.Regex.Match(lastAssistantMsg.Content, @"(TICK-\d+|#\d{4,6})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (match.Success)
+                        return match.Value;
+                }
+            }
+
+            return null;
         }
 
         private string LoadAgentPrompt(string intent)
@@ -255,6 +309,9 @@ namespace ChatApp.API.Services
             IMemoryService memoryService,
             ChatApp.Infrastructure.Data.ChatDbContext dbContext,
             ILogger<GeminiService> logger,
+            IToolRegistry toolRegistry,
+            IToolPolicy toolPolicy,
+            IToolThrottle toolThrottle,
             HttpClient? httpClient = null)
         {
             _configuration = configuration;
@@ -262,6 +319,9 @@ namespace ChatApp.API.Services
             _memoryService = memoryService;
             _dbContext = dbContext;
             _logger = logger;
+            _toolRegistry = toolRegistry;
+            _toolPolicy = toolPolicy;
+            _toolThrottle = toolThrottle;
             _modelName = configuration["Gemini:Model"] ?? "gemini-3.1-flash-lite";
 
             var configuredFallbacks = configuration.GetSection("Gemini:FallbackModels").Get<string[]>();
@@ -402,12 +462,12 @@ namespace ChatApp.API.Services
                                         ["category"] = new JsonObject
                                         {
                                             ["type"] = "STRING",
-                                            ["description"] = "one of: billing, technical, account, other"
+                                            ["description"] = "one of: billing, technical, account, security, other"
                                         },
                                         ["priority"] = new JsonObject
                                         {
                                             ["type"] = "STRING",
-                                            ["description"] = "Evaluated gravity: 'high' for core blockers (e.g. unable to type in chat window, cannot send messages, crash, billing charges), 'medium' for non-blocking bugs, 'low' for cosmetic/inquiries"
+                                            ["description"] = "Evaluated gravity: 'critical' for security incidents, data/chat leaks, account compromises, or active vulnerabilities; 'high' for core blockers (e.g. unable to type in chat window, cannot send messages, crash, billing charges); 'medium' for non-blocking bugs; 'low' for cosmetic/inquiries"
                                         },
                                         ["customerName"] = new JsonObject
                                         {
@@ -529,15 +589,172 @@ namespace ChatApp.API.Services
                 {
                     var functionCall = functionCallPart["functionCall"]?.AsObject();
                     var functionName = functionCall?["name"]?.ToString();
+                    var functionArgs = functionCall?["args"]?.AsObject();
+
+                    // ══════════════════════════════════════════════════════════════
+                    // SPRINT 1: Tool Governance Pipeline
+                    // THE LLM MAY REQUEST AN ACTION — THE BACKEND DECIDES IF ALLOWED
+                    // ══════════════════════════════════════════════════════════════
+
+                    // Step 1: Registry — validate tool exists and is enabled
+                    var registryResult = _toolRegistry.Resolve(functionName);
+                    if (!registryResult.Success)
+                    {
+                        _logger.LogWarning(
+                            "[Governance] Tool rejected by registry: '{Tool}', Reason={Reason}, Session={SessionId}",
+                            functionName, registryResult.BlockReason, sessionId);
+
+                        orchestrationSw.Stop();
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                            kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: functionName,
+                            toolAllowed: false,
+                            blockReason: registryResult.BlockReason);
+
+                        return new GeminiChatResult(
+                            registryResult.BlockMessage ?? "I'm unable to process that request right now. Please try again or contact support.",
+                            false, null, AuditLogId: null, IntentUsed: resolvedIntent);
+                    }
+
+                    var toolDef = registryResult.Tool!;
+
+                    // Step 2: Policy — authorization using server-side identity only
+                    var authContext = new ToolAuthContext(
+                        AuthenticatedUserId: authenticatedUserId,
+                        AuthenticatedEmail: authenticatedUserId.HasValue ? email : null,  // only trust email from JWT
+                        SessionId: sessionId);
+
+                    var policyResult = _toolPolicy.Authorize(toolDef, authContext);
+                    if (!policyResult.IsAllowed)
+                    {
+                        _logger.LogWarning(
+                            "[Governance] Tool '{Tool}' blocked by policy: {Reason}, Session={SessionId}",
+                            functionName, policyResult.BlockReason, sessionId);
+
+                        orchestrationSw.Stop();
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                            kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: functionName,
+                            toolAllowed: false,
+                            blockReason: policyResult.BlockReason);
+
+                        return new GeminiChatResult(
+                            policyResult.BlockMessage ?? "You are not authorized to use this feature.",
+                            false, null, AuditLogId: null, IntentUsed: resolvedIntent);
+                    }
+
+                    // Step 3: Throttle — per-session invocation limit
+                    var throttleResult = _toolThrottle.TryConsume(sessionId, functionName!, toolDef.MaxPerSession);
+                    if (!throttleResult.Allowed)
+                    {
+                        _logger.LogWarning(
+                            "[Governance] Tool '{Tool}' throttled for session {SessionId}: {Count}/{Max}",
+                            functionName, sessionId, throttleResult.CurrentCount, throttleResult.MaxAllowed);
+
+                        orchestrationSw.Stop();
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                            kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: functionName,
+                            toolAllowed: false,
+                            blockReason: ChatApp.Domain.Entities.AuditBlockReasons.ToolThrottled);
+
+                        return new GeminiChatResult(
+                            $"I've already performed this action {throttleResult.MaxAllowed} times in this session. Please start a new support session if you need further assistance.",
+                            false, null, AuditLogId: null, IntentUsed: resolvedIntent);
+                    }
+
+                    // Step 4: Argument validation
+                    var argValidation = ToolArgumentValidator.Validate(functionName!, functionArgs);
+                    if (!argValidation.IsValid)
+                    {
+                        _logger.LogWarning(
+                            "[Governance] Tool '{Tool}' argument validation failed: {Error}, Session={SessionId}",
+                            functionName, argValidation.ErrorMessage, sessionId);
+
+                        orchestrationSw.Stop();
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                            kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: functionName,
+                            toolAllowed: false,
+                            blockReason: ChatApp.Domain.Entities.AuditBlockReasons.ArgumentInvalid);
+
+                        return new GeminiChatResult(
+                            "I wasn't able to process that request because of an issue with the information provided. Please try rephrasing your request.",
+                            false, null, AuditLogId: null, IntentUsed: resolvedIntent);
+                    }
+
+                    // ── All governance checks passed — execute tool ────────────────
 
                     // ── escalateToHuman ──
                     if (string.Equals(functionName, "escalateToHuman", StringComparison.OrdinalIgnoreCase))
                     {
-                        var args = functionCall?["args"]?.AsObject();
+                        var args = functionArgs;
                         var reason = args?["reason"]?.ToString() ?? userMessage;
                         var urgency = args?["urgency"]?.ToString() ?? "high";
+                        // SECURITY: Name/email from LLM args are display-only metadata for the ticket.
+                        // The actual user identity (authenticatedUserId) always comes from the JWT context.
                         var escalateName = args?["customerName"]?.ToString() ?? username;
-                        var escalateEmail = args?["customerEmail"]?.ToString() ?? email;
+                        var escalateEmail = authenticatedUserId.HasValue
+                            ? email  // use JWT-verified email for authenticated users
+                            : args?["customerEmail"]?.ToString() ?? email; // guests: LLM arg is OK as contact detail
+
+                        var activeTicketRef = await GetSessionActiveTicketAsync(sessionId, conversationHistory);
+                        var isExpl = IsExplanatoryQuery(userMessage) || IsExplanatoryQuery(reason);
+                        var hasExplicitNewTicket = System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(another|new|second|separate)\s+ticket\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+                        if (activeTicketRef != null && !hasExplicitNewTicket)
+                        {
+                            _logger.LogInformation("escalateToHuman deduplicated: Active ticket {ActiveRef} already exists for session {SessionId}. Declining duplicate escalation.", activeTicketRef, sessionId);
+                            orchestrationSw.Stop();
+                            var auditIdDedup = await WriteAuditLogAsync(sessionId, resolvedIntent,
+                                intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                                kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                                activeTicketRef, userMessage,
+                                authenticatedUserId: authenticatedUserId,
+                                toolName: "escalateToHuman",
+                                toolAllowed: false,
+                                blockReason: ChatApp.Domain.Entities.AuditBlockReasons.DuplicateSessionTicketBlocked);
+
+                            var dedupReply = isExpl
+                                ? $"Chats on our platform are encrypted in transit via TLS 1.3 and at rest with AES-256 encryption. Potential leaks or unauthorized access can occur if an account password was compromised elsewhere, or if active sessions remained open on a shared or unattended device.\n\nYour existing incident ticket (**{activeTicketRef}**) is already actively assigned to our security engineering team, and they are reviewing your account logs. Please ensure you change your password in **Settings > Account** and click **Log out from all devices**."
+                                : $"Your case is already actively being tracked under ticket **{activeTicketRef}**. Our team has received your report and is investigating. We will follow up with you directly as soon as possible!";
+
+                            return new GeminiChatResult(dedupReply, true, null, AuditLogId: auditIdDedup, IntentUsed: resolvedIntent);
+                        }
+
+                        if (isExpl && !System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(create|open|file|make|talk|speak|escalat)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        {
+                            _logger.LogInformation("escalateToHuman declined for explanatory query '{UserMessage}'.", userMessage);
+                            orchestrationSw.Stop();
+                            var auditIdExpl = await WriteAuditLogAsync(sessionId, resolvedIntent,
+                                intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                                kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                                null, userMessage,
+                                authenticatedUserId: authenticatedUserId,
+                                toolName: "escalateToHuman",
+                                toolAllowed: false,
+                                blockReason: ChatApp.Domain.Entities.AuditBlockReasons.ExplanatoryQueryNotTicket);
+
+                            var explReply = "Chats on ChatApp are protected with TLS 1.3 encryption in transit and AES-256 encryption at rest. If messages appear exposed, common causes include:\n" +
+                                "1. **Reused or Compromised Passwords**: If your password was compromised on another service.\n" +
+                                "2. **Active Sessions on Other Devices**: If your account remained logged in on a shared computer or browser.\n" +
+                                "3. **Phishing or Device Access**: If unauthorized individuals gained physical or remote access to your device.\n\n" +
+                                "To protect your account right now, please go to **Settings > Account** to change your password and log out of all active sessions.";
+
+                            return new GeminiChatResult(explReply, false, null, AuditLogId: auditIdExpl, IntentUsed: resolvedIntent);
+                        }
 
                         _logger.LogWarning("Gemini triggered escalateToHuman: Reason='{Reason}', Urgency='{Urgency}', User='{User}'",
                             reason, urgency, escalateName ?? "Guest");
@@ -547,11 +764,16 @@ namespace ChatApp.API.Services
                             customerId, escalationIssue, "technical", "high",
                             escalateName, escalateEmail, authenticatedUserId);
 
+                        try { await _memoryService.SaveFactAsync(sessionId, "active_ticket_ref", $"TICK-{ticket.Id}", "support_verified"); } catch {}
+
                         orchestrationSw.Stop();
                         var auditId1 = await WriteAuditLogAsync(sessionId, resolvedIntent,
                             intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
                             kbContext, (int)orchestrationSw.ElapsedMilliseconds,
-                            $"TICK-{ticket.Id}", userMessage);
+                            $"TICK-{ticket.Id}", userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: "escalateToHuman",
+                            toolAllowed: true);
 
                         return new GeminiChatResult(
                             $"I can see you're having a really difficult time, and I sincerely apologize for the frustration. I've immediately escalated your case to our senior support team with **HIGH priority** — Ticket **#{ticket.Id}** has been created and our team will contact you as soon as possible. You deserve faster help than I can provide right now.",
@@ -561,12 +783,16 @@ namespace ChatApp.API.Services
                     // ── createTicket ──
                     if (string.Equals(functionName, "createTicket", StringComparison.OrdinalIgnoreCase))
                     {
-                        var args = functionCall?["args"]?.AsObject();
+                        var args = functionArgs;
                         var issue = args?["issue"]?.ToString() ?? userMessage;
                         var category = args?["category"]?.ToString() ?? "other";
                         var priority = args?["priority"]?.ToString() ?? "medium";
                         var ticketCustomerName = args?["customerName"]?.ToString() ?? username;
-                        var ticketCustomerEmail = args?["customerEmail"]?.ToString() ?? email;
+                        // SECURITY: For authenticated users, always use JWT-verified email.
+                        // For guests, the LLM-provided email is acceptable as a contact address.
+                        var ticketCustomerEmail = authenticatedUserId.HasValue
+                            ? email
+                            : args?["customerEmail"]?.ToString() ?? email;
 
                         // Code-level safety backstop: intercept complaints about AI itself
                         if (IsAiComplaint(issue) || IsAiComplaint(userMessage))
@@ -576,22 +802,69 @@ namespace ChatApp.API.Services
                             var auditIdDecline = await WriteAuditLogAsync(sessionId, resolvedIntent,
                                 intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
                                 kbContext, (int)orchestrationSw.ElapsedMilliseconds,
-                                null, userMessage);
+                                null, userMessage,
+                                authenticatedUserId: authenticatedUserId,
+                                toolName: "createTicket",
+                                toolAllowed: false,
+                                blockReason: "AiComplaintBackstop");
 
                             var declineReply = "I apologize for misunderstanding your question earlier! I cannot create a support ticket for my own conversational mistake or AI performance, but I would like to help get this right. Could you please restate your original question? If you are experiencing a genuine issue with ChatApp (such as an application bug, billing problem, or account issue), please let me know and I will be happy to create a ticket for our team.";
-
                             return new GeminiChatResult(declineReply, false, null, AuditLogId: auditIdDecline, IntentUsed: resolvedIntent);
                         }
 
-                        _logger.LogInformation("Gemini triggered createTicket: Issue='{Issue}', Category='{Category}', Priority='{Priority}', Requester='{Requester}', Email='{Email}', UserId='{UserId}'", 
-                            issue, category, priority, ticketCustomerName ?? "Guest", ticketCustomerEmail ?? "N/A", authenticatedUserId?.ToString() ?? "Guest");
+                        var activeTicketRef = await GetSessionActiveTicketAsync(sessionId, conversationHistory);
+                        var isExpl = IsExplanatoryQuery(userMessage) || IsExplanatoryQuery(issue);
+                        var hasExplicitNewTicket = System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(another|new|second|separate)\s+ticket\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-                        // Execute server-side Ticket creation and email
+                        if (activeTicketRef != null && !hasExplicitNewTicket)
+                        {
+                            _logger.LogInformation("createTicket deduplicated: Active ticket {ActiveRef} already exists for session {SessionId}. Declining duplicate ticket.", activeTicketRef, sessionId);
+                            orchestrationSw.Stop();
+                            var auditIdDedup = await WriteAuditLogAsync(sessionId, resolvedIntent,
+                                intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                                kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                                activeTicketRef, userMessage,
+                                authenticatedUserId: authenticatedUserId,
+                                toolName: "createTicket",
+                                toolAllowed: false,
+                                blockReason: ChatApp.Domain.Entities.AuditBlockReasons.DuplicateSessionTicketBlocked);
+
+                            var dedupReply = isExpl
+                                ? $"Chats on our platform are encrypted in transit using TLS 1.3 and at rest with AES-256. Leaks or unauthorized access typically occur due to an exposed password, an active session left open on a shared device, or credential compromise elsewhere.\n\nYour existing incident ticket (**{activeTicketRef}**) is already actively assigned to our security engineering team, and they are reviewing your account logs. Please ensure you change your password in **Settings > Account** and click **Log out from all devices**."
+                                : $"Your request is already being tracked under active ticket **{activeTicketRef}**. Our team has been notified and will follow up with you directly. If you have any additional details to add, please share them here and they will be noted!";
+
+                            return new GeminiChatResult(dedupReply, true, null, AuditLogId: auditIdDedup, IntentUsed: resolvedIntent);
+                        }
+
+                        if (isExpl && !System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(create|open|file|make)\s+(a\s+)?ticket\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        {
+                            _logger.LogInformation("createTicket declined for explanatory query '{UserMessage}'.", userMessage);
+                            orchestrationSw.Stop();
+                            var auditIdExpl = await WriteAuditLogAsync(sessionId, resolvedIntent,
+                                intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
+                                kbContext, (int)orchestrationSw.ElapsedMilliseconds,
+                                null, userMessage,
+                                authenticatedUserId: authenticatedUserId,
+                                toolName: "createTicket",
+                                toolAllowed: false,
+                                blockReason: ChatApp.Domain.Entities.AuditBlockReasons.ExplanatoryQueryNotTicket);
+
+                            var explReply = "Chats on ChatApp are protected with TLS 1.3 encryption in transit and AES-256 encryption at rest. If messages appear exposed, common causes include:\n" +
+                                "1. **Reused or Compromised Passwords**: If your password was compromised on another service.\n" +
+                                "2. **Active Sessions on Other Devices**: If your account remained logged in on a shared computer or browser.\n" +
+                                "3. **Phishing or Device Access**: If unauthorized individuals gained physical or remote access to your device.\n\n" +
+                                "To protect your account right now, please go to **Settings > Account** to change your password and log out of all active sessions. If you would like me to create a security support ticket for our engineering team to review your logs, please let me know!";
+
+                            return new GeminiChatResult(explReply, false, null, AuditLogId: auditIdExpl, IntentUsed: resolvedIntent);
+                        }
+
+                        _logger.LogInformation("Gemini triggered createTicket: Issue='{Issue}', Category='{Category}', Priority='{Priority}', Requester='{Requester}', UserId='{UserId}'",
+                            issue, category, priority, ticketCustomerName ?? "Guest", authenticatedUserId?.ToString() ?? "Guest");
+
                         var ticket = await _ticketService.CreateTicketAsync(customerId, issue, category, priority, ticketCustomerName, ticketCustomerEmail, authenticatedUserId);
+                        try { await _memoryService.SaveFactAsync(sessionId, "active_ticket_ref", $"TICK-{ticket.Id}", "support_verified"); } catch {}
 
-                        // 6. Send function response back to Gemini for the final natural-language answer
                         contents.Add(JsonNode.Parse(contentObj!.ToJsonString())!);
-
                         contents.Add(new JsonObject
                         {
                             ["role"] = "user",
@@ -626,10 +899,7 @@ namespace ChatApp.API.Services
                         {
                             ["systemInstruction"] = new JsonObject
                             {
-                                ["parts"] = new JsonArray
-                                {
-                                    new JsonObject { ["text"] = systemInstructionText }
-                                }
+                                ["parts"] = new JsonArray { new JsonObject { ["text"] = systemInstructionText } }
                             },
                             ["contents"] = JsonNode.Parse(contents.ToJsonString())
                         };
@@ -641,15 +911,16 @@ namespace ChatApp.API.Services
                                             ?? followUpParts?.FirstOrDefault(p => p?["text"] != null)?["text"]?.ToString();
 
                         if (string.IsNullOrWhiteSpace(followUpReply))
-                        {
                             followUpReply = $"I have created support ticket #{ticket.Id} for you. Our team will contact you within 24 hours.";
-                        }
 
                         orchestrationSw.Stop();
                         var auditId2 = await WriteAuditLogAsync(sessionId, resolvedIntent,
                             intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
                             kbContext, (int)orchestrationSw.ElapsedMilliseconds,
-                            $"TICK-{ticket.Id}", userMessage);
+                            $"TICK-{ticket.Id}", userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: "createTicket",
+                            toolAllowed: true);
 
                         return new GeminiChatResult(followUpReply, true, ticket.Id,
                             AuditLogId: auditId2, IntentUsed: resolvedIntent);
@@ -658,9 +929,16 @@ namespace ChatApp.API.Services
                     // ── getTicketStatus ──
                     if (string.Equals(functionName, "getTicketStatus", StringComparison.OrdinalIgnoreCase))
                     {
-                        var args = functionCall?["args"]?.AsObject();
+                        var args = functionArgs;
                         var ticketRef = args?["ticketIdOrRef"]?.ToString();
-                        var statusResult = await _ticketService.GetTicketStatusAsync(ticketRef, authenticatedUserId, email);
+
+                        // SECURITY (GAP-01 FIX): For authenticated users, pass only server-side identity.
+                        // The LLM-supplied customerEmail is NEVER used when the user is authenticated —
+                        // this prevents "User A → LLM args email=userB → reads UserB tickets".
+                        // For anonymous users, email from args is used as a contact filter (by design).
+                        string? statusEmail = authenticatedUserId.HasValue ? null : email;
+
+                        var statusResult = await _ticketService.GetTicketStatusAsync(ticketRef, authenticatedUserId, statusEmail);
 
                         _logger.LogInformation("Gemini triggered getTicketStatus: Ref='{Ref}', Found={Found}, Status='{Status}'",
                             ticketRef ?? "latest", statusResult.Found, statusResult.Status ?? "N/A");
@@ -695,21 +973,15 @@ namespace ChatApp.API.Services
 
                         systemInstructionText +=
                             "\n\nVERIFICATION BEFORE REPLYING: Compare the tool result you just received against the " +
-                            "user's actual question. If the tool result's subject does not match what the user asked " +
-                            "(for example, the user asked about a billing refund but the retrieved ticket is about an " +
-                            "unrelated feature request), do NOT present the tool result as the answer. Instead, tell the " +
-                            "user plainly that you did not find something matching their actual question, and address " +
-                            "their real question directly (referencing the KNOWLEDGE BASE CONTEXT or offering to create " +
-                            "a ticket, as appropriate).";
+                            "user's actual question. If the tool result's subject does not match what the user asked, " +
+                            "do NOT present the tool result as the answer. Instead, tell the user plainly that you did " +
+                            "not find something matching their actual question, and address their real question directly.";
 
                         var followUpRequestBody = new JsonObject
                         {
                             ["systemInstruction"] = new JsonObject
                             {
-                                ["parts"] = new JsonArray
-                                {
-                                    new JsonObject { ["text"] = systemInstructionText }
-                                }
+                                ["parts"] = new JsonArray { new JsonObject { ["text"] = systemInstructionText } }
                             },
                             ["contents"] = JsonNode.Parse(contents.ToJsonString())
                         };
@@ -725,7 +997,10 @@ namespace ChatApp.API.Services
                         var auditId = await WriteAuditLogAsync(sessionId, resolvedIntent,
                             intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
                             kbContext, (int)orchestrationSw.ElapsedMilliseconds,
-                            statusResult.ReferenceNumber, userMessage);
+                            statusResult.ReferenceNumber, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: "getTicketStatus",
+                            toolAllowed: true);
 
                         return new GeminiChatResult(followUpReply, false, statusResult.TicketId,
                             AuditLogId: auditId, IntentUsed: resolvedIntent);
@@ -734,7 +1009,7 @@ namespace ChatApp.API.Services
                     // ── searchChatHistory ──
                     if (string.Equals(functionName, "searchChatHistory", StringComparison.OrdinalIgnoreCase))
                     {
-                        var args = functionCall?["args"]?.AsObject();
+                        var args = functionArgs;
                         var query = args?["query"]?.ToString() ?? userMessage;
                         var pastExcerpts = await _memoryService.RetrievePastMessagesAsync(sessionId, query);
 
@@ -770,9 +1045,9 @@ namespace ChatApp.API.Services
                                             ["found"] = pastExcerpts.Count > 0,
                                             ["matchCount"] = pastExcerpts.Count,
                                             ["results"] = excerptsArray,
-                                            ["notes"] = pastExcerpts.Count > 0 
-                                                ? "These are verbatim past messages matching the query." 
-                                                : "No older messages matching the query were found outside the visible recent history. Note: The recent turns are already provided directly in the conversation context."
+                                            ["notes"] = pastExcerpts.Count > 0
+                                                ? "These are verbatim past messages matching the query."
+                                                : "No older messages matching the query were found outside the visible recent history."
                                         }
                                     }
                                 }
@@ -781,17 +1056,14 @@ namespace ChatApp.API.Services
 
                         systemInstructionText +=
                             "\n\nVERIFICATION & CONSISTENCY RULES:\n" +
-                            "1. Compare the tool result against the user's actual question. If the tool result's subject does not match what the user asked, do NOT present the tool result as the answer. Instead, tell the user plainly that you did not find something matching their actual question, and address their real question directly.\n" +
-                            "2. INTERNAL CONSISTENCY GUARD: Never claim you have no record of an interaction if the information is visible in the conversation context or known from user status/memory. Never pair an apology about having no record with an answer that contains the very information requested. If you know the answer or it is in the context, state it directly and consistently.";
+                            "1. Compare the tool result against the user's actual question. Answer directly if found.\n" +
+                            "2. Never claim you have no record of an interaction if the information is visible in context.";
 
                         var followUpRequestBody = new JsonObject
                         {
                             ["systemInstruction"] = new JsonObject
                             {
-                                ["parts"] = new JsonArray
-                                {
-                                    new JsonObject { ["text"] = systemInstructionText }
-                                }
+                                ["parts"] = new JsonArray { new JsonObject { ["text"] = systemInstructionText } }
                             },
                             ["contents"] = JsonNode.Parse(contents.ToJsonString())
                         };
@@ -813,7 +1085,10 @@ namespace ChatApp.API.Services
                         var auditId = await WriteAuditLogAsync(sessionId, resolvedIntent,
                             intent?.Confidence ?? 0.5f, workingModel ?? _modelName,
                             kbContext, (int)orchestrationSw.ElapsedMilliseconds,
-                            null, userMessage);
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: "searchChatHistory",
+                            toolAllowed: true);
 
                         return new GeminiChatResult(followUpReply, false, null,
                             AuditLogId: auditId, IntentUsed: resolvedIntent);
@@ -855,7 +1130,11 @@ namespace ChatApp.API.Services
             string kbContext,
             int latencyMs,
             string? ticketRef,
-            string userMessage)
+            string userMessage,
+            Guid? authenticatedUserId = null,
+            string? toolName = null,
+            bool? toolAllowed = null,
+            string? blockReason = null)
         {
             try
             {
@@ -864,6 +1143,19 @@ namespace ChatApp.API.Services
                     .Matches(kbContext ?? string.Empty, @"\[Topic: ([^\]]+)\]")
                     .Select(m => m.Groups[1].Value)
                     .ToList();
+
+                // Build ToolCallsJson if a tool was involved
+                string? toolCallsJson = null;
+                if (toolName != null)
+                {
+                    var toolEntry = new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["tool"] = toolName,
+                        ["allowed"] = toolAllowed ?? false,
+                        ["blockReason"] = blockReason
+                    };
+                    toolCallsJson = new System.Text.Json.Nodes.JsonArray(toolEntry).ToJsonString();
+                }
 
                 var auditLog = new ChatApp.Domain.Entities.AiAuditLog
                 {
@@ -876,7 +1168,10 @@ namespace ChatApp.API.Services
                     ModelUsed = modelUsed,
                     LatencyMs = latencyMs,
                     TicketRef = ticketRef,
-                    UserMessageSnippet = userMessage.Length > 500 ? userMessage[..497] + "..." : userMessage
+                    UserMessageSnippet = userMessage.Length > 500 ? userMessage[..497] + "..." : userMessage,
+                    ToolCallsJson = toolCallsJson,
+                    BlockReason = blockReason,
+                    AuthenticatedUserId = authenticatedUserId
                 };
 
                 _dbContext.AiAuditLogs.Add(auditLog);
@@ -1252,6 +1547,85 @@ namespace ChatApp.API.Services
 
                     _logger.LogInformation("Gemini SSE stream: functionCall detected — {FuncName}", funcName);
 
+                    // ══════════════════════════════════════════════════════════════
+                    // SPRINT 1: Tool Governance Pipeline (Streaming Path)
+                    // Same rules as ProcessChatAsync — no bypass for SSE.
+                    // ══════════════════════════════════════════════════════════════
+
+                    // Step 1: Registry
+                    var regResult = _toolRegistry.Resolve(funcName);
+                    if (!regResult.Success)
+                    {
+                        _logger.LogWarning("[Governance/Stream] Tool rejected by registry: '{Tool}', Reason={Reason}", funcName, regResult.BlockReason);
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, _modelName, kbContext, 0,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: funcName, toolAllowed: false, blockReason: regResult.BlockReason);
+
+                        yield return new StreamChunk(Text: regResult.BlockMessage ?? "I'm unable to process that request right now.");
+                        yield return new StreamChunk(Done: true, TicketCreated: ticketCreated, TicketId: ticketId);
+                        yield break;
+                    }
+                    var streamToolDef = regResult.Tool!;
+
+                    // Step 2: Policy
+                    var streamAuthCtx = new ToolAuthContext(
+                        AuthenticatedUserId: authenticatedUserId,
+                        AuthenticatedEmail: authenticatedUserId.HasValue ? email : null,
+                        SessionId: sessionId);
+                    var streamPolicyResult = _toolPolicy.Authorize(streamToolDef, streamAuthCtx);
+                    if (!streamPolicyResult.IsAllowed)
+                    {
+                        _logger.LogWarning("[Governance/Stream] Tool '{Tool}' blocked by policy: {Reason}", funcName, streamPolicyResult.BlockReason);
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, _modelName, kbContext, 0,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: funcName, toolAllowed: false, blockReason: streamPolicyResult.BlockReason);
+
+                        yield return new StreamChunk(Text: streamPolicyResult.BlockMessage ?? "You are not authorized to use this feature.");
+                        yield return new StreamChunk(Done: true, TicketCreated: ticketCreated, TicketId: ticketId);
+                        yield break;
+                    }
+
+                    // Step 3: Throttle
+                    var streamThrottle = _toolThrottle.TryConsume(sessionId, funcName!, streamToolDef.MaxPerSession);
+                    if (!streamThrottle.Allowed)
+                    {
+                        _logger.LogWarning("[Governance/Stream] Tool '{Tool}' throttled for session {SessionId}: {Count}/{Max}",
+                            funcName, sessionId, streamThrottle.CurrentCount, streamThrottle.MaxAllowed);
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, _modelName, kbContext, 0,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: funcName, toolAllowed: false,
+                            blockReason: ChatApp.Domain.Entities.AuditBlockReasons.ToolThrottled);
+
+                        yield return new StreamChunk(Text: $"I've already performed this action {streamThrottle.MaxAllowed} times in this session. Please start a new support session if you need further assistance.");
+                        yield return new StreamChunk(Done: true, TicketCreated: ticketCreated, TicketId: ticketId);
+                        yield break;
+                    }
+
+                    // Step 4: Argument validation
+                    var streamArgVal = ToolArgumentValidator.Validate(funcName!, funcArgs);
+                    if (!streamArgVal.IsValid)
+                    {
+                        _logger.LogWarning("[Governance/Stream] Tool '{Tool}' argument validation failed: {Error}", funcName, streamArgVal.ErrorMessage);
+                        await WriteAuditLogAsync(sessionId, resolvedIntent,
+                            intent?.Confidence ?? 0.5f, _modelName, kbContext, 0,
+                            null, userMessage,
+                            authenticatedUserId: authenticatedUserId,
+                            toolName: funcName, toolAllowed: false,
+                            blockReason: ChatApp.Domain.Entities.AuditBlockReasons.ArgumentInvalid);
+
+                        yield return new StreamChunk(Text: "I wasn't able to process that request because of an issue with the information provided. Please try rephrasing your request.");
+                        yield return new StreamChunk(Done: true, TicketCreated: ticketCreated, TicketId: ticketId);
+                        yield break;
+                    }
+
+                    // ── All governance checks passed — execute tool ────────────────
+
                     // Signal the controller that a function call fired
                     yield return new StreamChunk(FunctionCallName: funcName, FunctionCallArgs: funcArgs);
 
@@ -1265,23 +1639,54 @@ namespace ChatApp.API.Services
                             var reason        = funcArgs?["reason"]?.ToString() ?? userMessage;
                             var urgency       = funcArgs?["urgency"]?.ToString() ?? "high";
                             var escalateName  = funcArgs?["customerName"]?.ToString() ?? username;
-                            var escalateEmail = funcArgs?["customerEmail"]?.ToString() ?? email;
-                            var issue         = $"[URGENT ESCALATION - {urgency.ToUpperInvariant()}] {reason}";
+                            // SECURITY: JWT email for authenticated users; LLM arg only for guests
+                            var escalateEmail = authenticatedUserId.HasValue ? email : (funcArgs?["customerEmail"]?.ToString() ?? email);
 
-                            var ticket = await _ticketService.CreateTicketAsync(
-                                customerId, issue, "technical", "high",
-                                escalateName, escalateEmail, authenticatedUserId);
+                            var activeTicketRef = await GetSessionActiveTicketAsync(sessionId, conversationHistory);
+                            var isExpl = IsExplanatoryQuery(userMessage) || IsExplanatoryQuery(reason);
+                            var hasExplicitNewTicket = System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(another|new|second|separate)\s+ticket\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-                            ticketCreated = true;
-                            ticketId      = ticket.Id;
+                            if (activeTicketRef != null && !hasExplicitNewTicket)
+                            {
+                                _logger.LogInformation("StreamChatAsync: escalateToHuman deduplicated: Active ticket {ActiveRef} already exists for session {SessionId}.", activeTicketRef, sessionId);
+                                var dedupReply = isExpl
+                                    ? $"Chats on our platform are encrypted in transit via TLS 1.3 and at rest with AES-256 encryption. Potential leaks or unauthorized access can occur if an account password was compromised elsewhere, or if active sessions remained open on a shared or unattended device.\n\nYour existing incident ticket (**{activeTicketRef}**) is already actively assigned to our security engineering team, and they are reviewing your account logs. Please ensure you change your password in **Settings > Account** and click **Log out from all devices**."
+                                    : $"Your case is already actively being tracked under ticket **{activeTicketRef}**. Our team has received your report and is investigating. We will follow up with you directly as soon as possible!";
 
-                            var escalationMsg =
-                                $"I can see you're having a really difficult time, and I sincerely apologize. " +
-                                $"I've immediately escalated your case with **HIGH priority** — Ticket **#{ticket.Id}** has been created. " +
-                                $"Our team will contact you as soon as possible.";
+                                assembledText.Append(dedupReply);
+                                pendingYieldText = dedupReply;
+                            }
+                            else if (isExpl && !System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(create|open|file|make|talk|speak|escalat)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                            {
+                                _logger.LogInformation("StreamChatAsync: escalateToHuman declined for explanatory query '{UserMessage}'.", userMessage);
+                                var explReply = "Chats on ChatApp are protected with TLS 1.3 encryption in transit and AES-256 encryption at rest. If messages appear exposed, common causes include:\n" +
+                                    "1. **Reused or Compromised Passwords**: If your password was compromised on another service.\n" +
+                                    "2. **Active Sessions on Other Devices**: If your account remained logged in on a shared computer or browser.\n" +
+                                    "3. **Phishing or Device Access**: If unauthorized individuals gained physical or remote access to your device.\n\n" +
+                                    "To protect your account right now, please go to **Settings > Account** to change your password and log out of all active sessions.";
 
-                            assembledText.Append(escalationMsg);
-                            pendingYieldText = escalationMsg;
+                                assembledText.Append(explReply);
+                                pendingYieldText = explReply;
+                            }
+                            else
+                            {
+                                var issue = $"[URGENT ESCALATION - {urgency.ToUpperInvariant()}] {reason}";
+                                var ticket = await _ticketService.CreateTicketAsync(
+                                    customerId, issue, "technical", "high",
+                                    escalateName, escalateEmail, authenticatedUserId);
+
+                                ticketCreated = true;
+                                ticketId      = ticket.Id;
+                                try { await _memoryService.SaveFactAsync(sessionId, "active_ticket_ref", $"TICK-{ticket.Id}", "support_verified"); } catch {}
+
+                                var escalationMsg =
+                                    $"I can see you're having a really difficult time, and I sincerely apologize. " +
+                                    $"I've immediately escalated your case with **HIGH priority** — Ticket **#{ticket.Id}** has been created. " +
+                                    $"Our team will contact you as soon as possible.";
+
+                                assembledText.Append(escalationMsg);
+                                pendingYieldText = escalationMsg;
+                            }
                         }
                         else if (string.Equals(funcName, "createTicket", StringComparison.OrdinalIgnoreCase))
                         {
@@ -1289,7 +1694,8 @@ namespace ChatApp.API.Services
                             var category      = funcArgs?["category"]?.ToString() ?? "other";
                             var priority      = funcArgs?["priority"]?.ToString() ?? "medium";
                             var ticketName    = funcArgs?["customerName"]?.ToString() ?? username;
-                            var ticketEmail   = funcArgs?["customerEmail"]?.ToString() ?? email;
+                            // SECURITY: JWT email for authenticated users; LLM arg only for guests
+                            var ticketEmail   = authenticatedUserId.HasValue ? email : (funcArgs?["customerEmail"]?.ToString() ?? email);
 
                             // Code-level safety backstop: intercept complaints about AI itself
                             if (IsAiComplaint(issue) || IsAiComplaint(userMessage))
@@ -1303,19 +1709,48 @@ namespace ChatApp.API.Services
                             }
                             else
                             {
-                                var ticket = await _ticketService.CreateTicketAsync(
-                                    customerId, issue, category, priority,
-                                    ticketName, ticketEmail, authenticatedUserId);
+                                var activeTicketRef = await GetSessionActiveTicketAsync(sessionId, conversationHistory);
+                                var isExpl = IsExplanatoryQuery(userMessage) || IsExplanatoryQuery(issue);
+                                var hasExplicitNewTicket = System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(another|new|second|separate)\s+ticket\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-                                ticketCreated = true;
-                                ticketId      = ticket.Id;
+                                if (activeTicketRef != null && !hasExplicitNewTicket)
+                                {
+                                    _logger.LogInformation("StreamChatAsync: createTicket deduplicated: Active ticket {ActiveRef} already exists for session {SessionId}.", activeTicketRef, sessionId);
+                                    var dedupReply = isExpl
+                                        ? $"Chats on our platform are encrypted in transit using TLS 1.3 and at rest with AES-256. Leaks or unauthorized access typically occur due to an exposed password, an active session left open on a shared device, or credential compromise elsewhere.\n\nYour existing incident ticket (**{activeTicketRef}**) is already actively assigned to our security engineering team, and they are reviewing your account logs. Please ensure you change your password in **Settings > Account** and click **Log out from all devices**."
+                                        : $"Your request is already being tracked under active ticket **{activeTicketRef}**. Our team has been notified and will follow up with you directly. If you have any additional details to add, please share them here and they will be noted!";
 
-                                // Do a non-streaming follow-up call so Gemini can phrase the confirmation naturally
-                                var followUpContents = JsonNode.Parse(contents.ToJsonString())!.AsArray();
-                                // Append the model's function-call turn
-                                followUpContents.Add(JsonNode.Parse(chunkObj["candidates"]![0]!["content"]!.ToJsonString())!);
-                                // Append our function response
-                                followUpContents.Add(new JsonObject
+                                    assembledText.Append(dedupReply);
+                                    pendingYieldText = dedupReply;
+                                }
+                                else if (isExpl && !System.Text.RegularExpressions.Regex.IsMatch(userMessage, @"\b(create|open|file|make)\s+(a\s+)?ticket\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                                {
+                                    _logger.LogInformation("StreamChatAsync: createTicket declined for explanatory query '{UserMessage}'.", userMessage);
+                                    var explReply = "Chats on ChatApp are protected with TLS 1.3 encryption in transit and AES-256 encryption at rest. If messages appear exposed, common causes include:\n" +
+                                        "1. **Reused or Compromised Passwords**: If your password was compromised on another service.\n" +
+                                        "2. **Active Sessions on Other Devices**: If your account remained logged in on a shared computer or browser.\n" +
+                                        "3. **Phishing or Device Access**: If unauthorized individuals gained physical or remote access to your device.\n\n" +
+                                        "To protect your account right now, please go to **Settings > Account** to change your password and log out of all active sessions. If you would like me to create a security support ticket for our engineering team to review your logs, please let me know!";
+
+                                    assembledText.Append(explReply);
+                                    pendingYieldText = explReply;
+                                }
+                                else
+                                {
+                                    var ticket = await _ticketService.CreateTicketAsync(
+                                        customerId, issue, category, priority,
+                                        ticketName, ticketEmail, authenticatedUserId);
+
+                                    ticketCreated = true;
+                                    ticketId      = ticket.Id;
+                                    try { await _memoryService.SaveFactAsync(sessionId, "active_ticket_ref", $"TICK-{ticket.Id}", "support_verified"); } catch {}
+
+                                    // Do a non-streaming follow-up call so Gemini can phrase the confirmation naturally
+                                    var followUpContents = JsonNode.Parse(contents.ToJsonString())!.AsArray();
+                                    // Append the model's function-call turn
+                                    followUpContents.Add(JsonNode.Parse(chunkObj["candidates"]![0]!["content"]!.ToJsonString())!);
+                                    // Append our function response
+                                    followUpContents.Add(new JsonObject
                                 {
                                     ["role"] = "user",
                                     ["parts"] = new JsonArray
@@ -1365,10 +1800,13 @@ namespace ChatApp.API.Services
                                 pendingYieldText = fuReply;
                             }
                         }
-                        else if (string.Equals(funcName, "getTicketStatus", StringComparison.OrdinalIgnoreCase))
+                    }
+                    else if (string.Equals(funcName, "getTicketStatus", StringComparison.OrdinalIgnoreCase))
                         {
                             var ticketRef = funcArgs?["ticketIdOrRef"]?.ToString();
-                            var statusResult = await _ticketService.GetTicketStatusAsync(ticketRef, authenticatedUserId, email);
+                            // SECURITY (GAP-01 FIX): Authenticated users scoped to JWT identity only
+                            string? statusEmail = authenticatedUserId.HasValue ? null : email;
+                            var statusResult = await _ticketService.GetTicketStatusAsync(ticketRef, authenticatedUserId, statusEmail);
 
                             _logger.LogInformation("Gemini SSE stream: getTicketStatus called for '{Ref}' - Found={Found}",
                                 ticketRef ?? "latest", statusResult.Found);

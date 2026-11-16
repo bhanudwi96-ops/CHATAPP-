@@ -484,7 +484,7 @@ namespace ChatApp.API.Services
                 "INITIAL ANCHOR TURNS:\n" + anchorText + "\n\n" +
                 "FULL CONVERSATION:\n" + fullHistoryText;
 
-            var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apiKey}";
+            var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";
             var payload = new
             {
                 contents = new[]
@@ -501,7 +501,13 @@ namespace ChatApp.API.Services
                 using var content = new System.Net.Http.StringContent(
                     JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
-                var response = await http.PostAsync(endpoint, content, cts.Token);
+                using var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, endpoint)
+                {
+                    Content = content
+                };
+                request.Headers.Add("x-goog-api-key", apiKey);
+
+                var response = await http.SendAsync(request, cts.Token);
                 if (!response.IsSuccessStatusCode) return;
 
                 var json = await response.Content.ReadAsStringAsync();

@@ -83,7 +83,20 @@ namespace ChatApp.Tests
                 });
 
             var httpClient = new HttpClient(mockHttpMessageHandler.Object);
-            var geminiService = new GeminiService(config, mockTicket.Object, mockMemory.Object, dbContext, mockLogger.Object, httpClient);
+
+            // Sprint 1 governance services — use real implementations with permissive config for integration tests
+            var testConfig = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AI:Tools:createTicket:Enabled"] = "true",   ["AI:Tools:createTicket:RequiresAuth"] = "false",   ["AI:Tools:createTicket:MaxPerSession"] = "10",
+                ["AI:Tools:escalateToHuman:Enabled"] = "true",["AI:Tools:escalateToHuman:RequiresAuth"] = "false",["AI:Tools:escalateToHuman:MaxPerSession"] = "10",
+                ["AI:Tools:getTicketStatus:Enabled"] = "true",["AI:Tools:getTicketStatus:RequiresAuth"] = "false",["AI:Tools:getTicketStatus:MaxPerSession"] = "10",
+                ["AI:Tools:searchChatHistory:Enabled"] = "true",["AI:Tools:searchChatHistory:RequiresAuth"] = "false",["AI:Tools:searchChatHistory:MaxPerSession"] = "10",
+            }).Build();
+            var toolRegistry = new ToolRegistry(testConfig, new Mock<ILogger<ToolRegistry>>().Object);
+            var toolPolicy   = new ToolPolicy(new Mock<ILogger<ToolPolicy>>().Object);
+            var toolThrottle = new ToolThrottle(new Mock<ILogger<ToolThrottle>>().Object);
+
+            var geminiService = new GeminiService(config, mockTicket.Object, mockMemory.Object, dbContext, mockLogger.Object, toolRegistry, toolPolicy, toolThrottle, httpClient);
 
             var intent = new IntentResult("OutOfScope", 0.75f, "Below threshold but out of scope");
 
@@ -163,7 +176,20 @@ namespace ChatApp.Tests
                 });
 
             var httpClient = new HttpClient(mockHttpMessageHandler.Object);
-            var geminiService = new GeminiService(config, mockTicket.Object, mockMemory.Object, dbContext, mockLogger.Object, httpClient);
+
+            // Sprint 1 governance services — use real implementations with permissive config for integration tests
+            var testConfig2 = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AI:Tools:createTicket:Enabled"] = "true",   ["AI:Tools:createTicket:RequiresAuth"] = "false",   ["AI:Tools:createTicket:MaxPerSession"] = "10",
+                ["AI:Tools:escalateToHuman:Enabled"] = "true",["AI:Tools:escalateToHuman:RequiresAuth"] = "false",["AI:Tools:escalateToHuman:MaxPerSession"] = "10",
+                ["AI:Tools:getTicketStatus:Enabled"] = "true",["AI:Tools:getTicketStatus:RequiresAuth"] = "false",["AI:Tools:getTicketStatus:MaxPerSession"] = "10",
+                ["AI:Tools:searchChatHistory:Enabled"] = "true",["AI:Tools:searchChatHistory:RequiresAuth"] = "false",["AI:Tools:searchChatHistory:MaxPerSession"] = "10",
+            }).Build();
+            var toolRegistry2 = new ToolRegistry(testConfig2, new Mock<ILogger<ToolRegistry>>().Object);
+            var toolPolicy2   = new ToolPolicy(new Mock<ILogger<ToolPolicy>>().Object);
+            var toolThrottle2 = new ToolThrottle(new Mock<ILogger<ToolThrottle>>().Object);
+
+            var geminiService = new GeminiService(config, mockTicket.Object, mockMemory.Object, dbContext, mockLogger.Object, toolRegistry2, toolPolicy2, toolThrottle2, httpClient);
 
             var intent = new IntentResult("FAQ", 0.95f, "FAQ query");
 
