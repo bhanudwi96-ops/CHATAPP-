@@ -17,16 +17,22 @@ namespace ChatApp.API.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "6.0.25")
+                .HasAnnotation("ProductVersion", "8.0.11")
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
-            SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder, 1L, 1);
+            SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
             modelBuilder.Entity("ChatApp.Domain.Entities.AiAuditLog", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AuthenticatedUserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("BlockReason")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<int>("InputTokens")
                         .HasColumnType("int");
@@ -62,6 +68,9 @@ namespace ChatApp.API.Migrations
 
                     b.Property<DateTime>("Timestamp")
                         .HasColumnType("datetime2");
+
+                    b.Property<string>("ToolCallsJson")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("UserMessageSnippet")
                         .HasMaxLength(500)
@@ -266,7 +275,7 @@ namespace ChatApp.API.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("int");
 
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"), 1L, 1);
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
                     b.Property<string>("Content")
                         .IsRequired()
@@ -562,7 +571,7 @@ namespace ChatApp.API.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("int");
 
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"), 1L, 1);
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
                     b.Property<string>("Category")
                         .IsRequired()

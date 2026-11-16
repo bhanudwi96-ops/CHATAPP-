@@ -50,6 +50,27 @@ namespace ChatApp.API.Services
 
         public async Task<IntentResult> ClassifyAsync(string userMessage, string? conversationContext = null, System.Threading.CancellationToken cancellationToken = default)
         {
+            // Deterministic Fast-Path: Explanatory / diagnostic questions ("why it is happening", "how did this happen")
+            // seeking understanding of an issue are FAQ/informational, unless the user explicitly requests human escalation or ticket filing.
+            if (!string.IsNullOrWhiteSpace(userMessage))
+            {
+                var trimmedLower = userMessage.Trim().ToLowerInvariant();
+                var isExplanatory = System.Text.RegularExpressions.Regex.IsMatch(trimmedLower,
+                    @"^(why|how|what causes|what caused)\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase,
+                    TimeSpan.FromMilliseconds(50));
+
+                var hasExplicitEscalationOrTicket = System.Text.RegularExpressions.Regex.IsMatch(trimmedLower,
+                    @"\b(ticket|human|agent|representative|supervisor|escalat|file a|open a)\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase,
+                    TimeSpan.FromMilliseconds(50));
+
+                if (isExplanatory && !hasExplicitEscalationOrTicket)
+                {
+                    return new IntentResult("FAQ", 0.98f, "Deterministic: User is asking an explanatory why/how question, not requesting escalation or ticket creation.");
+                }
+            }
+
             // Load valid intents from config so new intents need no code change
             var validIntents = _configuration.GetSection("AI:Intents").Get<string[]>()
                 ?? new[] { "FAQ", "CreateTicket", "EscalateToHuman", "OutOfScope" };
@@ -60,9 +81,9 @@ namespace ChatApp.API.Services
                 $"You are a precise intent classifier for a customer support chatbot. " +
                 $"Classify the user message into exactly ONE of these intents: {intentsFormatted}.\n\n" +
                 $"Intent definitions:\n" +
-                $"- FAQ: User is asking a how-to question, seeking information, troubleshooting steps, greetings, bot identity, OR asking about the conversation itself (such as recalling prior questions, 'what was my first question?', 'what did I ask earlier?', 'what did you say?').\n" +
-                $"- CreateTicket: User describes a specific bug, error, billing problem, or complaint that requires a human to follow up.\n" +
-                $"- EscalateToHuman: User is visibly frustrated, angry, distressed, or is explicitly asking to speak to a human agent.\n" +
+                $"- FAQ: User is asking a how-to question, seeking information or explanation (e.g. 'why it is happening', 'why did this happen', 'how does this occur', 'what causes this'), troubleshooting steps, greetings, expressions of emotion ('i m upset', 'i feel bad') without asking for an agent, bot identity, conversational statements, OR asking about the conversation itself (such as recalling prior questions, 'what was my first question?', 'what did I ask earlier?', 'what did you say?'). Questions asking WHY or HOW an issue occurs are informational FAQ queries, NOT ticket or escalation requests.\n" +
+                $"- CreateTicket: User describes a specific bug, error, billing problem, or complaint that requires a human to follow up. Must be an actual report or request, not an explanatory why/how question.\n" +
+                $"- EscalateToHuman: User explicitly asks to speak with a human agent, representative, or supervisor (e.g. 'talk to a human', 'give me an agent', 'escalate'), OR describes an unresolved severe issue and demands human intervention. Vague expressions of emotion or explanatory questions ('why it is happening') without an explicit escalation request must be classified as FAQ.\n" +
                 $"- OutOfScope: User is asking about external general knowledge completely unrelated to ChatApp or this chat session (celebrities, sports, history, general programming tutorials, weather, other apps). NOTE: Questions about this conversation or previous messages are IN-SCOPE conversation queries and must NEVER be classified as OutOfScope.\n\n" +
                 $"Respond ONLY with valid JSON in this exact format (no markdown, no extra text):\n" +
                 $"{{\"intent\": \"FAQ\", \"confidence\": 0.95, \"reasoning\": \"User is asking how to create a group\"}}";
@@ -84,7 +105,7 @@ namespace ChatApp.API.Services
             }
 
             var model = _configuration[RouterModelKey] ?? RouterModelDefault;
-            var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apiKey}";
+            var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";
 
             var payload = new JsonObject
             {
@@ -116,7 +137,13 @@ namespace ChatApp.API.Services
                     payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false }),
                     Encoding.UTF8, "application/json");
 
-                var response = await _http.PostAsync(endpoint, httpContent, linkedCts.Token);
+                using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+                {
+                    Content = httpContent
+                };
+                request.Headers.Add("x-goog-api-key", apiKey);
+
+                var response = await _http.SendAsync(request, linkedCts.Token);
                 if (!response.IsSuccessStatusCode)
                 {
                     _logger.LogWarning("Intent router returned {Status} — fallback to ClassificationUnavailable.", (int)response.StatusCode);
